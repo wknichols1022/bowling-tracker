@@ -9,10 +9,10 @@ import json
 from datetime import datetime
 from typing import Dict, Optional
 
-from ball_tracker import BallTracker
-from speed_calculator import SpeedCalculator
-from database import BowlingDatabase
-from video_stabilizer import VideoStabilizer
+from src.ball_tracker import BallTracker
+from src.speed_calculator import SpeedCalculator
+from src.database import BowlingDatabase
+from src.video_stabilizer import VideoStabilizer
 
 
 class VideoProcessor:
@@ -119,7 +119,7 @@ class VideoProcessor:
             print("Step 0: Calculating stabilization transforms...")
             try:
                 stabilization_transforms = self.stabilizer.calculate_transforms(video_path)
-                print(f"✓ Stabilization analysis complete ({len(stabilization_transforms)} frames)\n")
+                print(f"[OK] Stabilization analysis complete ({len(stabilization_transforms)} frames)\n")
             except Exception as e:
                 print(f"Warning: Stabilization failed ({str(e)}), proceeding without stabilization\n")
                 stabilization_transforms = None
@@ -175,7 +175,7 @@ class VideoProcessor:
                 "shot_number": shot_number
             }
         
-        print(f"✓ Ball tracked in {len(trajectory)} frames\n")
+        print(f"[OK] Ball tracked in {len(trajectory)} frames\n")
         
         # Step 2: Calculate speed
         print("Step 2: Calculating speed...")
@@ -249,7 +249,7 @@ class VideoProcessor:
                 "shot_number": shot_number
             }
         
-        print(f"✓ Speed: {speed_data['speed_mph']} mph "
+        print(f"[OK] Speed: {speed_data['speed_mph']} mph "
               f"({speed_data['speed_fps']} ft/s)")
         print(f"  Distance: {speed_data['distance_feet']} feet")
         print(f"  Time: {speed_data['time_seconds']} seconds\n")
@@ -263,7 +263,7 @@ class VideoProcessor:
                 print(f"Warning: Trajectory analysis incomplete: {trajectory_analysis['error']}")
                 trajectory_analysis = {"trajectory_type": "unknown"}
             else:
-                print(f"✓ Trajectory type: {trajectory_analysis['trajectory_type']}")
+                print(f"[OK] Trajectory type: {trajectory_analysis['trajectory_type']}")
                 print(f"  Lateral deviation: "
                       f"{trajectory_analysis.get('lateral_deviation_pixels', 'N/A')} pixels\n")
         except Exception as e:
@@ -277,11 +277,33 @@ class VideoProcessor:
         release_point = trajectory[0][:2] if trajectory else None
         impact_point = trajectory[-1][:2] if trajectory else None
 
-        # Convert trajectory to JSON
+        # Convert trajectory to JSON (handle numpy types)
+        def convert_numpy_types(obj):
+            """Recursively convert numpy types to Python native types."""
+            import numpy as np
+            if isinstance(obj, dict):
+                return {k: convert_numpy_types(v) for k, v in obj.items()}
+            elif isinstance(obj, list):
+                return [convert_numpy_types(item) for item in obj]
+            elif isinstance(obj, tuple):
+                return tuple(convert_numpy_types(item) for item in obj)
+            elif isinstance(obj, (np.integer, np.int64, np.int32)):
+                return int(obj)
+            elif isinstance(obj, (np.floating, np.float64, np.float32)):
+                return float(obj)
+            elif isinstance(obj, np.ndarray):
+                return convert_numpy_types(obj.tolist())
+            else:
+                return obj
+
         try:
+            # Convert numpy int64 to Python int
+            trajectory_points = [(int(x), int(y), int(frame)) for x, y, frame in trajectory]
+            # Also convert all numpy types in trajectory_analysis
+            trajectory_analysis_clean = convert_numpy_types(trajectory_analysis)
             trajectory_json = json.dumps({
-                "points": trajectory,
-                "analysis": trajectory_analysis
+                "points": trajectory_points,
+                "analysis": trajectory_analysis_clean
             })
         except (TypeError, ValueError) as e:
             print(f"Warning: Failed to serialize trajectory data: {e}")
@@ -298,7 +320,7 @@ class VideoProcessor:
                 release_point=release_point,
                 impact_point=impact_point
             )
-            print(f"✓ Shot saved with ID: {shot_id}\n")
+            print(f"[OK] Shot saved with ID: {shot_id}\n")
         except Exception as e:
             print(f"ERROR: Failed to save to database: {e}")
             return {

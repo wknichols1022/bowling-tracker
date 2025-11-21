@@ -240,64 +240,59 @@ class SpeedCalculator:
         x2, y2 = point2
         return np.sqrt((x2 - x1)**2 + (y2 - y1)**2)
     
-    def calculate_speed_from_trajectory(self, 
+    def calculate_speed_from_trajectory(self,
                                        trajectory: List[Tuple[int, int, int]],
                                        start_frame: int = None,
                                        end_frame: int = None) -> Dict[str, float]:
         """
         Calculate ball speed from trajectory data.
-        
+
+        For head-mounted cameras, we use the known lane length (60 feet) and time elapsed
+        to calculate average speed, rather than pixel-to-pixel distance which is unreliable
+        when the camera is moving.
+
         Args:
             trajectory: List of (x, y, frame_number) tuples
             start_frame: Optional starting frame for calculation
             end_frame: Optional ending frame for calculation
-            
+
         Returns:
             Dictionary with speed in various units
         """
         if not trajectory or len(trajectory) < 2:
             return {"error": "Insufficient trajectory data"}
-        
-        if self.pixels_per_foot is None:
-            return {"error": "Must calibrate before calculating speed"}
-        
+
         # Filter trajectory by frame range if specified
         if start_frame is not None or end_frame is not None:
             start_frame = start_frame or 0
             end_frame = end_frame or float('inf')
-            trajectory = [(x, y, f) for x, y, f in trajectory 
+            trajectory = [(x, y, f) for x, y, f in trajectory
                          if start_frame <= f <= end_frame]
-        
+
         if len(trajectory) < 2:
             return {"error": "Insufficient trajectory data in specified range"}
-        
-        # Calculate total distance traveled in pixels
-        total_distance_pixels = 0
-        for i in range(len(trajectory) - 1):
-            p1 = trajectory[i][:2]
-            p2 = trajectory[i + 1][:2]
-            total_distance_pixels += self.calculate_distance(p1, p2)
-        
-        # Convert to feet
-        total_distance_feet = total_distance_pixels / self.pixels_per_foot
-        
+
+        # For head-mounted cameras tracking bowling shots, use lane length as distance
+        # The ball travels approximately 60 feet from release to pins
+        distance_feet = self.lane_length_feet
+
         # Calculate time elapsed
         frame_start = trajectory[0][2]
         frame_end = trajectory[-1][2]
         frames_elapsed = frame_end - frame_start
         time_elapsed_seconds = frames_elapsed / self.fps
-        
+
         if time_elapsed_seconds == 0:
             return {"error": "No time elapsed between trajectory points"}
-        
+
         # Calculate speed in different units
-        speed_fps = total_distance_feet / time_elapsed_seconds  # Feet per second
+        speed_fps = distance_feet / time_elapsed_seconds  # Feet per second
         speed_mph = speed_fps * 0.681818  # Miles per hour
-        
+
         return {
             "speed_fps": round(speed_fps, 2),
             "speed_mph": round(speed_mph, 2),
-            "distance_feet": round(total_distance_feet, 2),
+            "distance_feet": round(distance_feet, 2),
             "time_seconds": round(time_elapsed_seconds, 2),
             "frames_analyzed": frames_elapsed,
         }

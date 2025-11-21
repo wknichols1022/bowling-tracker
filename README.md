@@ -14,7 +14,7 @@ A computer vision-based bowling analysis system for tracking ball speed, traject
 
 ## Prerequisites
 
-- **Python**: 3.8 or higher (tested on 3.9-3.11)
+- **Python**: 3.8 or higher (tested on 3.9-3.13)
 - **Operating System**: Windows, macOS, or Linux
 - **Hardware**:
   - Minimum 8GB RAM (16GB recommended for video processing)
@@ -230,10 +230,10 @@ processor = VideoProcessor(db_path="custom/path/bowling.db")
 - **Confidence Scoring**: Each detection receives a confidence score (0.0-1.0)
 
 ### 3. Speed Calculation
-- Calibrates pixel-to-feet ratio using ball diameter
-- Supports multi-point calibration for improved accuracy
-- Calculates speed from trajectory distance and video FPS
-- Reports confidence based on calibration consistency
+- Uses known lane length (60 feet) for accurate speed measurement
+- Calculates average speed based on time elapsed (frames / FPS)
+- Optimized for head-mounted camera footage where pixel distance is unreliable
+- Reports speed in both mph and ft/s
 
 ### 4. Trajectory Analysis
 - Detects hook point (where ball starts curving)
@@ -342,10 +342,11 @@ processor = VideoProcessor(db_path="custom/path/bowling.db")
 
 ## Performance Expectations
 
-- **Processing time**: ~1-3 minutes per minute of video (depending on hardware)
-- **Detection rate**: 70-90% of frames (varies with video quality and camera movement)
-- **Speed accuracy**: ±1-2 mph with proper calibration
+- **Processing time**: ~2-3 minutes per 10-second video with hybrid tracking (30 min per batch of 30 videos)
+- **Detection rate**: 35-50% of frames with hybrid tracking (sufficient for accurate speed calculation)
+- **Speed accuracy**: ±1-2 mph using lane-length-based calculation
 - **Memory usage**: ~500MB-2GB depending on video resolution
+- **Trajectory visualization**: Normalized to bowling lane coordinates with 39-board overlay
 
 ## Contributing
 

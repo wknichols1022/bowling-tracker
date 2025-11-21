@@ -125,17 +125,38 @@ def create_trajectory_overlay(shots_df):
                     points = traj_data['points']
 
                     # Extract x, y coordinates from trajectory points
-                    # Assuming points are in format [[x, y, ...], ...]
+                    # Points are in format [(x, y, frame), ...] from video coordinates
                     x_coords = []
                     y_coords = []
 
+                    # Get the range of coordinates to map to lane
+                    x_values = [p[0] for p in points if len(p) >= 2]
+                    y_values = [p[1] for p in points if len(p) >= 2]
+
+                    if not x_values or not y_values:
+                        continue
+
+                    x_min, x_max = min(x_values), max(x_values)
+                    y_min, y_max = min(y_values), max(y_values)
+
+                    # Prevent division by zero
+                    x_range = x_max - x_min if x_max != x_min else 1
+                    y_range = y_max - y_min if y_max != y_min else 1
+
                     for point in points:
                         if len(point) >= 2:
-                            # Normalize coordinates to lane dimensions (boards)
-                            # This is a simple normalization - will need adjustment based on actual data
-                            # Assuming x-coordinate represents lateral position across boards
-                            x_norm = (point[0] / max([p[0] for p in points if len(p) >= 2] + [1])) * lane_width_px
-                            y_norm = (point[1] / max([p[1] for p in points if len(p) >= 2] + [1])) * (lane_length_px - 20) + 10
+                            # Map video x-coordinates to lane width (boards)
+                            # Center the trajectory horizontally around board 20
+                            x_normalized = (point[0] - x_min) / x_range  # 0 to 1
+                            x_centered = (x_normalized - 0.5)  # -0.5 to 0.5
+                            # Map to boards (use about 15 boards range for visibility)
+                            x_board = 20 + (x_centered * 15)  # Center around board 20
+                            x_norm = x_board * board_width_px
+
+                            # Map video y-coordinates to lane length
+                            # Start at foul line (y=10px) and go to pins
+                            y_normalized = (point[1] - y_min) / y_range  # 0 to 1
+                            y_norm = 10 + (y_normalized * (lane_length_px - 20))
 
                             x_coords.append(x_norm)
                             y_coords.append(y_norm)
@@ -164,19 +185,25 @@ def create_trajectory_overlay(shots_df):
 
                     if 'analysis' in traj_data and 'hook_point' in traj_data['analysis']:
                         hook_data = traj_data['analysis']['hook_point']
-                        if 'hook_point_x' in hook_data:
-                            # Calculate hook board position
-                            hook_x_px = (hook_data['hook_point_x'] / max([p[0] for p in points if len(p) >= 2] + [1])) * lane_width_px
-                            hook_board = int(hook_x_px / board_width_px)
+                        if 'hook_point_x' in hook_data and 'hook_point_y' in hook_data:
+                            # Map hook point using same transformation as trajectory
+                            hook_x_normalized = (hook_data['hook_point_x'] - x_min) / x_range
+                            hook_x_centered = (hook_x_normalized - 0.5)
+                            hook_x_board = 20 + (hook_x_centered * 15)
+                            hook_x_px = hook_x_board * board_width_px
+                            hook_board = int(hook_x_board)
+
+                            hook_y_normalized = (hook_data['hook_point_y'] - y_min) / y_range
+                            hook_y_px = 10 + (hook_y_normalized * (lane_length_px - 20))
 
                             if hook_data.get('distance_from_start_feet'):
                                 hook_distance = f"{hook_data['distance_from_start_feet']:.1f} ft"
+                            else:
+                                hook_distance = "N/A"
 
                             hook_point_info = f"<br>Hook Point: Board {hook_board} @ {hook_distance}"
 
                             # Plot hook point marker
-                            hook_y_px = (hook_data['hook_point_y'] / max([p[1] for p in points if len(p) >= 2] + [1])) * (lane_length_px - 20) + 10
-
                             fig.add_trace(go.Scatter(
                                 x=[hook_x_px],
                                 y=[hook_y_px],

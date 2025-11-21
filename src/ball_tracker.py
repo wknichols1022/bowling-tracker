@@ -373,16 +373,16 @@ class BallTracker:
 
         # Update Kalman filter
         if self.enable_kalman and self.kalman is not None:
-            measurement = np.array([[np.float32(best.x)], [np.float32(best.y)]])
+            measurement = np.array([[np.float32(best.x)], [np.float32(best.y)]], dtype=np.float32)
 
             if self.last_detection is None:
                 # First detection - initialize state
                 self.kalman.statePre = np.array([
                     [np.float32(best.x)],
                     [np.float32(best.y)],
-                    [0],
-                    [0]
-                ])
+                    [np.float32(0)],
+                    [np.float32(0)]
+                ], dtype=np.float32)
 
             self.kalman.correct(measurement)
             self.last_detection = (best.x, best.y)
