@@ -94,8 +94,8 @@ class VideoProcessor:
         if shot_number is not None and (not isinstance(shot_number, int) or shot_number < 1):
             raise ValueError(f"Invalid shot_number: {shot_number}. Must be a positive integer.")
 
-        if not isinstance(ball_color, str) or ball_color.lower() not in ["red", "blue", "green", "black", "purple", "orange"]:
-            raise ValueError(f"Invalid ball_color: {ball_color}. Must be one of: red, blue, green, black, purple, orange")
+        if not isinstance(ball_color, str) or ball_color.lower() not in ["red", "blue", "green", "black", "purple", "orange", "pink"]:
+            raise ValueError(f"Invalid ball_color: {ball_color}. Must be one of: red, blue, green, black, purple, orange, pink")
 
         print(f"\n{'='*60}")
         print(f"Processing video: {os.path.basename(video_path)}")
@@ -359,6 +359,7 @@ class VideoProcessor:
             "black": ((0, 0, 0), (180, 255, 30)),
             "purple": ((130, 100, 100), (160, 255, 255)),
             "orange": ((10, 100, 100), (25, 255, 255)),
+            "pink": ((145, 80, 80), (170, 255, 255)),
         }
         
         if color.lower() in color_ranges:
@@ -551,7 +552,7 @@ def main():
     parser.add_argument(
         "--color", "-c",
         default="red",
-        choices=["red", "blue", "green", "black", "purple", "orange"],
+        choices=["red", "blue", "green", "black", "purple", "orange", "pink"],
         help="Ball color for detection"
     )
     parser.add_argument(

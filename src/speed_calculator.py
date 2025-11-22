@@ -272,9 +272,24 @@ class SpeedCalculator:
         if len(trajectory) < 2:
             return {"error": "Insufficient trajectory data in specified range"}
 
-        # For head-mounted cameras tracking bowling shots, use lane length as distance
-        # The ball travels approximately 60 feet from release to pins
-        distance_feet = self.lane_length_feet
+        # For head-mounted cameras, use vertical (y-axis) pixel distance
+        # as the primary measure of down-lane travel
+        if self.pixels_per_foot is None:
+            return {"error": "Must calibrate before calculating speed"}
+
+        # Calculate vertical pixel distance (down-lane travel)
+        y_start = trajectory[0][1]
+        y_end = trajectory[-1][1]
+        vertical_pixels = abs(y_end - y_start)
+
+        # Convert to feet using calibration
+        distance_feet = vertical_pixels / self.pixels_per_foot
+
+        # Apply lane length scaling factor: typical bowling shot is 60 feet
+        # This multiplier accounts for camera perspective and angle
+        # Adjust this value based on actual measurements (start with 3.0x multiplier)
+        perspective_multiplier = 3.0
+        distance_feet = distance_feet * perspective_multiplier
 
         # Calculate time elapsed
         frame_start = trajectory[0][2]

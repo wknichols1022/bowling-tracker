@@ -34,7 +34,10 @@ class BallTracker:
                  color_upper: Optional[Tuple[int, int, int]] = None,
                  min_radius: int = 15,
                  max_radius: int = 80,
-                 enable_kalman: bool = True):
+                 enable_kalman: bool = True,
+                 roi_top_ratio: float = 0.5,
+                 roi_left_ratio: float = 0.3,
+                 roi_right_ratio: float = 0.3):
         """
         Initialize hybrid ball tracker.
 
@@ -44,6 +47,9 @@ class BallTracker:
             min_radius: Minimum ball radius in pixels (default: 15)
             max_radius: Maximum ball radius in pixels (default: 80)
             enable_kalman: Use Kalman filter for smoothing (default: True)
+            roi_top_ratio: Ignore top portion of frame (0.5 = ignore top 50%)
+            roi_left_ratio: Ignore left portion of frame (0.3 = ignore left 30%)
+            roi_right_ratio: Ignore right portion of frame (0.3 = ignore right 30%)
         """
         # Color detection (optional)
         self.color_lower = np.array(color_lower) if color_lower else None
@@ -54,8 +60,19 @@ class BallTracker:
         self.min_radius = min_radius
         self.max_radius = max_radius
 
+        # Region of interest (to ignore ceiling lights and gutters)
+        self.roi_top_ratio = roi_top_ratio
+        self.roi_left_ratio = roi_left_ratio
+        self.roi_right_ratio = roi_right_ratio
+
         # Trajectory storage
         self.trajectory = []
+
+        # Release detection (to ignore ball in hand)
+        self.ball_released = False
+        self.release_buffer = []  # Buffer of recent Y positions
+        self.release_buffer_size = 5  # Frames needed for release confirmation
+        self.min_downward_distance = 30  # Min Y increase to confirm release
 
         # Motion detection
         self.bg_subtractor = cv2.createBackgroundSubtractorMOG2(
@@ -166,8 +183,17 @@ class BallTracker:
         """
         candidates = []
 
+        # Apply ROI to ignore top, left, and right portions
+        height, width = frame.shape[:2]
+        roi_start_y = int(height * self.roi_top_ratio)
+        roi_start_x = int(width * self.roi_left_ratio)
+        roi_end_x = int(width * (1 - self.roi_right_ratio))
+
+        # Crop to ROI (focus on center lane area)
+        frame_roi = frame[roi_start_y:, roi_start_x:roi_end_x]
+
         # Convert to grayscale
-        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+        gray = cv2.cvtColor(frame_roi, cv2.COLOR_BGR2GRAY)
 
         # Apply Gaussian blur
         gray = cv2.GaussianBlur(gray, (9, 9), 2)
@@ -190,6 +216,10 @@ class BallTracker:
             for circle in circles[0]:
                 x, y, r = circle
 
+                # Adjust coordinates back to original frame
+                x_adjusted = x + roi_start_x
+                y_adjusted = y + roi_start_y
+
                 # Calculate shape score based on edge strength
                 mask = np.zeros(gray.shape, dtype=np.uint8)
                 cv2.circle(mask, (x, y), r, 255, 2)
@@ -202,8 +232,8 @@ class BallTracker:
                 shape_score = min(1.0, shape_score / 50)
 
                 candidates.append(DetectionCandidate(
-                    x=int(x),
-                    y=int(y),
+                    x=int(x_adjusted),
+                    y=int(y_adjusted),
                     radius=int(r),
                     confidence=shape_score,
                     detection_method="shape",
@@ -245,8 +275,8 @@ class BallTracker:
 
         color_score = matching_pixels / total_pixels if total_pixels > 0 else 0.0
 
-        # Consider it a match if >30% of pixels match
-        color_match = color_score > 0.3
+        # Consider it a match if >50% of pixels match (stricter to avoid lights)
+        color_match = color_score > 0.5
 
         return color_match, color_score
 
@@ -272,6 +302,12 @@ class BallTracker:
                 frame, candidate.x, candidate.y, candidate.radius
             )
             candidate.color_match = color_match
+
+            # If color detection is enabled, require BOTH shape AND color match
+            if self.use_color:
+                # Only accept shape-detected candidates that match the color
+                if candidate.detection_method == "shape" and not color_match:
+                    continue  # Skip candidates that don't match color
 
             # Calculate combined confidence
             if candidate.detection_method == "motion":
@@ -300,14 +336,15 @@ class BallTracker:
             pred_x, pred_y = int(prediction[0]), int(prediction[1])
 
             # Filter candidates that are too far from prediction
-            max_distance = 100  # pixels
+            # Stricter threshold: bowling ball shouldn't jump > 40 pixels between frames
+            max_distance = 40  # pixels (reduced from 100)
             filtered = []
 
             for candidate in all_candidates:
                 dist = np.sqrt((candidate.x - pred_x)**2 + (candidate.y - pred_y)**2)
                 if dist < max_distance:
                     # Boost confidence if close to prediction
-                    candidate.confidence *= (1 + 0.3 * (1 - dist / max_distance))
+                    candidate.confidence *= (1 + 0.5 * (1 - dist / max_distance))
                     filtered.append(candidate)
 
             all_candidates = filtered if filtered else all_candidates
@@ -426,6 +463,21 @@ class BallTracker:
         frame_number = 0
         prev_gray = None
 
+        # Reset release detection for new video
+        self.ball_released = False
+        self.release_buffer = []
+
+        # Initialize outlier rejection buffer (separate from trajectory)
+        outlier_buffer = []
+        trajectory_segment = []  # Track current segment for median-based outlier detection
+
+        # Initialize optical flow tracker (simple custom tracker)
+        tracker_bbox = None  # (x, y, width, height)
+        tracker_initialized = False
+        tracker_failures = 0
+        max_tracker_failures = 10
+        prev_frame_for_tracking = None
+
         # Setup video writer if saving output
         out = None
         if save_output:
@@ -442,25 +494,182 @@ class BallTracker:
                 if not ret:
                     break
 
-                # Detect ball
-                detection = self.detect_ball(frame, prev_gray)
+                x, y, radius = None, None, None
 
-                if detection and detection[3] >= min_confidence:
-                    x, y, radius, confidence = detection
-                    self.trajectory.append((x, y, frame_number))
+                # If tracker is active, use optical flow
+                if tracker_initialized and tracker_bbox is not None and prev_frame_for_tracking is not None:
+                    # Use optical flow to track the center point
+                    prev_gray_track = cv2.cvtColor(prev_frame_for_tracking, cv2.COLOR_BGR2GRAY)
+                    curr_gray_track = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+
+                    # Track the center point of the bbox
+                    center_x = tracker_bbox[0] + tracker_bbox[2] // 2
+                    center_y = tracker_bbox[1] + tracker_bbox[3] // 2
+                    prev_pts = np.array([[[float(center_x), float(center_y)]]], dtype=np.float32)
+
+                    # Calculate optical flow
+                    next_pts, status, error = cv2.calcOpticalFlowPyrLK(
+                        prev_gray_track, curr_gray_track, prev_pts, None,
+                        winSize=(21, 21), maxLevel=3
+                    )
+
+                    if status[0][0] == 1:
+                        # Successfully tracked
+                        new_center_x = int(next_pts[0][0][0])
+                        new_center_y = int(next_pts[0][0][1])
+
+                        # Validate tracker position - check if out of bounds only
+                        # (Don't restrict upper portion - ball naturally moves up in frame as it goes down lane)
+                        frame_height = frame.shape[0]
+                        frame_width = frame.shape[1]
+
+                        # Check if tracker went out of bounds
+                        if new_center_x < 0 or new_center_x >= frame_width or new_center_y < 0 or new_center_y >= frame_height:
+                            # Tracker went out of bounds
+                            tracker_initialized = False
+                            tracker_bbox = None
+                            print(f"  Tracker invalidated at frame {frame_number} - out of bounds")
+                        else:
+                            # Tracker position is valid
+                            # Update bbox position
+                            tracker_bbox = (
+                                new_center_x - tracker_bbox[2] // 2,
+                                new_center_y - tracker_bbox[3] // 2,
+                                tracker_bbox[2],
+                                tracker_bbox[3]
+                            )
+
+                            x = new_center_x
+                            y = new_center_y
+                            radius = tracker_bbox[2] // 2
+                            tracker_failures = 0
+                    else:
+                        # Tracking failed
+                        tracker_failures += 1
+                        if tracker_failures >= max_tracker_failures:
+                            tracker_initialized = False
+                            tracker_bbox = None
+                            print(f"  Tracker lost at frame {frame_number}, reinitializing...")
+
+                # If no tracker or tracker failed, use detection
+                if not tracker_initialized or tracker_failures > 0:
+                    detection = self.detect_ball(frame, prev_gray)
+
+                    if detection and detection[3] >= min_confidence:
+                        x, y, radius, confidence = detection
+
+                        # If ball released but tracker not yet initialized, try to initialize it
+                        if self.ball_released and not tracker_initialized:
+                            frame_height = frame.shape[0]
+                            min_tracker_radius = 30  # Increased from 25
+                            in_bottom_portion = y > (frame_height * 0.3)  # Bottom 70% only (stricter)
+
+                            if radius >= min_tracker_radius and in_bottom_portion:
+                                tracker_bbox = (x - radius, y - radius, radius * 2, radius * 2)
+                                prev_frame_for_tracking = frame.copy()
+                                tracker_initialized = True
+                                # Clear buffers when tracker reinitializes (new tracking segment)
+                                outlier_buffer = []
+                                trajectory_segment = []  # Track current segment separately for outlier detection
+                                print(f"  Tracker initialized at frame {frame_number} (delayed, r={radius}, y={y}/{frame_height})")
+
+                        # Check if ball has been released
+                        if not self.ball_released:
+                            # Add Y position to buffer
+                            self.release_buffer.append(y)
+
+                            # Keep buffer at max size
+                            if len(self.release_buffer) > self.release_buffer_size:
+                                self.release_buffer.pop(0)
+
+                            # Check for consistent downward motion
+                            if len(self.release_buffer) >= self.release_buffer_size:
+                                # Calculate Y distance from first to last position in buffer
+                                y_movement = self.release_buffer[-1] - self.release_buffer[0]
+
+                                # Check if all positions show increasing Y (moving down)
+                                is_moving_down = all(
+                                    self.release_buffer[i] < self.release_buffer[i + 1]
+                                    for i in range(len(self.release_buffer) - 1)
+                                )
+
+                                if is_moving_down and y_movement > self.min_downward_distance:
+                                    self.ball_released = True
+                                    print(f"  Ball release detected at frame {frame_number}")
+
+                                    # Initialize optical flow tracker on release
+                                    # Only initialize if object is large enough and in bottom 70%
+                                    frame_height = frame.shape[0]
+                                    min_tracker_radius = 30  # Increased from 25
+                                    in_bottom_portion = y > (frame_height * 0.3)  # Bottom 70% only
+
+                                    if radius >= min_tracker_radius and in_bottom_portion:
+                                        tracker_bbox = (x - radius, y - radius, radius * 2, radius * 2)
+                                        prev_frame_for_tracking = frame.copy()
+                                        tracker_initialized = True
+                                        # Clear outlier buffer for new tracking segment
+                                        outlier_buffer = []
+                                        print(f"  Tracker initialized at frame {frame_number} (r={radius}, y={y}/{frame_height})")
+                                    else:
+                                        print(f"  Release detected but object too small/far (r={radius}, y={y}/{frame_height}), waiting for better detection...")
+
+                # Record trajectory if we have a valid position after release
+                if self.ball_released and x is not None and y is not None:
+                    # Outlier rejection: check for sudden jumps within the current segment
+                    # This allows gradual X changes due to perspective but rejects tracking errors
+                    should_record = True
+
+                    # Do outlier checking if we have at least 1 point in current segment
+                    if len(trajectory_segment) >= 1:
+                        # Compare to last point in the CURRENT segment only
+                        last_x = trajectory_segment[-1][0]
+
+                        # Use more lenient threshold for first few points, stricter after established
+                        # This allows new segments to establish but still catches gross outliers
+                        if len(trajectory_segment) < 5:
+                            max_jump = 200  # Lenient for first few points of new segment
+                        else:
+                            max_jump = 80  # Strict once segment is established
+
+                        x_jump = abs(x - last_x)
+
+                        if x_jump > max_jump:
+                            should_record = False
+                            print(f"  Rejected outlier at frame {frame_number}: x={x}, segment_last_x={last_x}, jump={x_jump:.0f}px (max={max_jump}, seg_len={len(trajectory_segment)})")
+
+                    if should_record:
+                        self.trajectory.append((x, y, frame_number))
+                        trajectory_segment.append((x, y, frame_number))
+                        # Add to outlier buffer for current tracking segment
+                        outlier_buffer.append((x, y, frame_number))
+                        # Keep buffer at reasonable size
+                        if len(outlier_buffer) > 50:
+                            outlier_buffer.pop(0)
 
                     # Draw on frame if saving
                     if save_output:
-                        cv2.circle(frame, (x, y), radius, (0, 255, 0), 2)
+                        color = (0, 255, 0) if tracker_initialized else (255, 0, 255)
+                        cv2.circle(frame, (x, y), radius, color, 2)
                         cv2.circle(frame, (x, y), 3, (0, 0, 255), -1)
-                        cv2.putText(frame, f"Conf: {confidence:.2f}",
+                        mode = "Tracker" if tracker_initialized else "Detect"
+                        cv2.putText(frame, mode,
                                   (x - 40, y - radius - 10),
-                                  cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 2)
+                                  cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 2)
+                elif save_output and not self.ball_released and x is not None:
+                    # Before release: draw in yellow
+                    cv2.circle(frame, (x, y), radius, (0, 255, 255), 2)
+                    cv2.putText(frame, "Pre-release",
+                              (x - 40, y - radius - 10),
+                              cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 255), 2)
 
                 if save_output and out is not None:
                     out.write(frame)
 
-                # Update previous frame
+                # Update previous frame for tracking
+                if tracker_initialized:
+                    prev_frame_for_tracking = frame.copy()
+
+                # Update previous frame for motion detection
                 prev_gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
                 frame_number += 1
 

@@ -4,6 +4,7 @@ Streamlit dashboard for visualizing bowling performance data.
 
 import streamlit as st
 import pandas as pd
+import numpy as np
 import plotly.express as px
 import plotly.graph_objects as go
 from datetime import datetime
@@ -22,16 +23,19 @@ def create_trajectory_overlay(shots_df):
     Returns:
         Plotly figure object
     """
-    # Bowling lane dimensions
+    # Bowling lane dimensions (standard USBC specs)
     LANE_LENGTH = 60  # foul line to headpin (feet)
-    LANE_WIDTH = 3.5  # standard lane width (feet)
-    BOARD_WIDTH = 1.0  # inches per board
+    LANE_WIDTH = 41.5  # 41.5 inches = 39 boards + gutters (inches)
     NUM_BOARDS = 39  # standard number of boards
+    BOARD_WIDTH_INCHES = 1.0  # inches per board
 
-    # Convert to pixels for visualization (scale factor)
-    SCALE = 10  # pixels per foot
-    lane_length_px = LANE_LENGTH * SCALE
-    lane_width_px = LANE_LENGTH * SCALE  # Make it square for better visibility
+    # Convert to pixels for visualization
+    # Use a scale that creates a reasonable aspect ratio for display
+    SCALE = 8  # pixels per foot for length
+    WIDTH_SCALE = 12  # pixels per board for width
+
+    lane_length_px = LANE_LENGTH * SCALE  # 480px tall
+    lane_width_px = NUM_BOARDS * WIDTH_SCALE  # 468px wide (similar to length for good visibility)
 
     # Calculate board positions
     board_width_px = lane_width_px / NUM_BOARDS
@@ -65,7 +69,7 @@ def create_trajectory_overlay(shots_df):
         type="line",
         x0=0, y0=10,
         x1=lane_width_px, y1=10,
-        line=dict(color="red", width=2, dash="dash"),
+        line=dict(color="red", width=3, dash="dash"),
         layer="below"
     )
 
@@ -75,10 +79,40 @@ def create_trajectory_overlay(shots_df):
         x_pos = board * board_width_px
         fig.add_shape(
             type="circle",
-            x0=x_pos - 2, y0=approach_y - 2,
-            x1=x_pos + 2, y1=approach_y + 2,
+            x0=x_pos - 2.5, y0=approach_y - 2.5,
+            x1=x_pos + 2.5, y1=approach_y + 2.5,
             fillcolor="black",
             line=dict(color="black"),
+            layer="below"
+        )
+
+    # Draw target dots (lane dots) at ~7 feet from foul line
+    # Standard positions: boards 5, 10, 15, 20, 25, 30, 35
+    dots_y = 10 + (7 * SCALE)  # 7 feet from foul line
+    for board in [5, 10, 15, 20, 25, 30, 35]:
+        x_pos = board * board_width_px
+        fig.add_shape(
+            type="circle",
+            x0=x_pos - 2, y0=dots_y - 2,
+            x1=x_pos + 2, y1=dots_y + 2,
+            fillcolor="black",
+            line=dict(color="black"),
+            layer="below"
+        )
+
+    # Draw arrows at 15 feet from foul line
+    # Standard positions: boards 5, 10, 15, 20, 25, 30, 35
+    arrows_y = 10 + (15 * SCALE)  # 15 feet from foul line
+    arrow_size = 4  # Size of arrow markers
+
+    for board in [5, 10, 15, 20, 25, 30, 35]:
+        x_pos = board * board_width_px
+        # Draw chevron/arrow shape pointing down the lane
+        fig.add_shape(
+            type="path",
+            path=f"M {x_pos},{arrows_y - arrow_size} L {x_pos - arrow_size},{arrows_y + arrow_size} L {x_pos},{arrows_y} L {x_pos + arrow_size},{arrows_y + arrow_size} Z",
+            fillcolor="black",
+            line=dict(color="black", width=1),
             layer="below"
         )
 
@@ -129,12 +163,59 @@ def create_trajectory_overlay(shots_df):
                     x_coords = []
                     y_coords = []
 
-                    # Get the range of coordinates to map to lane
-                    x_values = [p[0] for p in points if len(p) >= 2]
-                    y_values = [p[1] for p in points if len(p) >= 2]
-
-                    if not x_values or not y_values:
+                    # Filter points to only include forward motion (Y should increase down the lane)
+                    # Ball can't physically move backwards, so remove any segments where Y decreases
+                    if not points or len(points) < 5:
                         continue
+
+                    # Keep only points where Y is increasing or staying roughly the same
+                    filtered_points = []
+                    max_y_seen = 0
+
+                    for point in points:
+                        if len(point) >= 2:
+                            x, y = point[0], point[1]
+                            # Allow small decreases (noise) but reject large backwards movement
+                            if y >= max_y_seen - 50:  # Allow 50px tolerance for noise
+                                filtered_points.append(point)
+                                max_y_seen = max(max_y_seen, y)
+
+                    if not filtered_points or len(filtered_points) < 5:
+                        continue
+
+                    # Split into continuous segments to handle perspective changes
+                    # (head-mounted camera causes different X ranges at different Y depths)
+                    # A segment is continuous if Y values don't have large gaps
+                    segments = []
+                    current_segment = [filtered_points[0]]
+
+                    for i in range(1, len(filtered_points)):
+                        prev_y = filtered_points[i-1][1]
+                        curr_y = filtered_points[i][1]
+
+                        # If Y gap is too large (>100px), start new segment
+                        if curr_y - prev_y > 100:
+                            if len(current_segment) >= 5:  # Only keep segments with enough points
+                                segments.append(current_segment)
+                            current_segment = [filtered_points[i]]
+                        else:
+                            current_segment.append(filtered_points[i])
+
+                    # Add final segment
+                    if len(current_segment) >= 5:
+                        segments.append(current_segment)
+
+                    if not segments:
+                        continue
+
+                    # Use only the longest continuous segment to avoid perspective distortion
+                    # This prevents combining segments from different camera depths
+                    longest_segment = max(segments, key=lambda seg: len(seg))
+                    filtered_points = longest_segment
+
+                    # Get ranges from the longest continuous segment only
+                    x_values = [p[0] for p in filtered_points]
+                    y_values = [p[1] for p in filtered_points]
 
                     x_min, x_max = min(x_values), max(x_values)
                     y_min, y_max = min(y_values), max(y_values)
@@ -143,26 +224,27 @@ def create_trajectory_overlay(shots_df):
                     x_range = x_max - x_min if x_max != x_min else 1
                     y_range = y_max - y_min if y_max != y_min else 1
 
-                    for point in points:
-                        if len(point) >= 2:
-                            # Map video x-coordinates to lane width (boards)
-                            # Center the trajectory horizontally around board 20
-                            x_normalized = (point[0] - x_min) / x_range  # 0 to 1
-                            x_centered = (x_normalized - 0.5)  # -0.5 to 0.5
-                            # Map to boards (use about 15 boards range for visibility)
-                            x_board = 20 + (x_centered * 15)  # Center around board 20
-                            x_norm = x_board * board_width_px
+                    # Normalize points to lane coordinates
+                    for point in filtered_points:
+                        # Map video x-coordinates to lane width (boards)
+                        # Center the trajectory horizontally around board 20
+                        x_normalized = (point[0] - x_min) / x_range  # 0 to 1
+                        x_centered = (x_normalized - 0.5)  # -0.5 to 0.5
+                        # Map to boards (use about 15 boards range for visibility)
+                        x_board = 20 + (x_centered * 15)  # Center around board 20
+                        x_norm = x_board * board_width_px
 
-                            # Map video y-coordinates to lane length
-                            # Start at foul line (y=10px) and go to pins
-                            y_normalized = (point[1] - y_min) / y_range  # 0 to 1
-                            y_norm = 10 + (y_normalized * (lane_length_px - 20))
+                        # Map video y-coordinates to lane length
+                        # Start at foul line (y=10px) and go to pins
+                        y_normalized = (point[1] - y_min) / y_range  # 0 to 1
+                        y_norm = 10 + (y_normalized * (lane_length_px - 20))
 
-                            x_coords.append(x_norm)
-                            y_coords.append(y_norm)
+                        x_coords.append(x_norm)
+                        y_coords.append(y_norm)
 
                     # Convert x positions to board numbers for display
-                    board_positions = [int(x / board_width_px) for x in x_coords]
+                    # Axis is reversed: board 39 on left (x=0), board 1 on right (x=max)
+                    board_positions = [40 - int(x / board_width_px) for x in x_coords]
 
                     # Get trajectory type for color
                     traj_type = 'default'
@@ -186,14 +268,18 @@ def create_trajectory_overlay(shots_df):
                     if 'analysis' in traj_data and 'hook_point' in traj_data['analysis']:
                         hook_data = traj_data['analysis']['hook_point']
                         if 'hook_point_x' in hook_data and 'hook_point_y' in hook_data:
+                            hook_x_raw = hook_data['hook_point_x']
+                            hook_y_raw = hook_data['hook_point_y']
+
                             # Map hook point using same transformation as trajectory
-                            hook_x_normalized = (hook_data['hook_point_x'] - x_min) / x_range
+                            hook_x_normalized = (hook_x_raw - x_min) / x_range
                             hook_x_centered = (hook_x_normalized - 0.5)
                             hook_x_board = 20 + (hook_x_centered * 15)
                             hook_x_px = hook_x_board * board_width_px
-                            hook_board = int(hook_x_board)
+                            # Convert to display board number (axis is reversed)
+                            hook_board = 40 - int(hook_x_board)
 
-                            hook_y_normalized = (hook_data['hook_point_y'] - y_min) / y_range
+                            hook_y_normalized = (hook_y_raw - y_min) / y_range
                             hook_y_px = 10 + (hook_y_normalized * (lane_length_px - 20))
 
                             if hook_data.get('distance_from_start_feet'):
@@ -221,28 +307,101 @@ def create_trajectory_overlay(shots_df):
                                             f"Distance: {hook_distance}<extra></extra>"
                             ))
 
-                    # Plot trajectory
-                    fig.add_trace(go.Scatter(
-                        x=x_coords,
-                        y=y_coords,
-                        mode='lines',
-                        line=dict(color=color, width=2),
-                        opacity=0.6,
-                        name=f"Shot {shot['shot_number']} ({traj_type})",
-                        hovertemplate=f"<b>Shot {shot['shot_number']}</b><br>" +
-                                    f"Speed: {speed_info}<br>" +
-                                    f"Type: {traj_type}<br>" +
-                                    f"Release: Board {release_board}<br>" +
-                                    f"Impact: Board {impact_board}" +
-                                    hook_point_info + "<br>" +
-                                    f"Date: {shot['session_date']}<extra></extra>"
-                    ))
+                    # Draw trajectory like Facebook reference: black line with dots and triangles
+                    if len(x_coords) > 0:
+                        # First, draw the continuous black line connecting all points
+                        fig.add_trace(go.Scatter(
+                            x=x_coords,
+                            y=y_coords,
+                            mode='lines',
+                            line=dict(
+                                color='black',
+                                width=2
+                            ),
+                            showlegend=False,
+                            hoverinfo='skip'
+                        ))
+
+                        # Split trajectory into early (black dots) and rest (black triangles)
+                        num_early = max(3, len(x_coords) // 5)  # First 20% or at least 3 points
+
+                        # Early trajectory points (near release) - black dots
+                        fig.add_trace(go.Scatter(
+                            x=x_coords[:num_early],
+                            y=y_coords[:num_early],
+                            mode='markers',
+                            marker=dict(
+                                size=8,
+                                color='black',
+                                symbol='circle',
+                                line=dict(width=1, color='black')
+                            ),
+                            showlegend=False,
+                            hovertemplate=f"<b>Shot {shot['shot_number']}</b><br>" +
+                                        f"Release area<extra></extra>"
+                        ))
+
+                        # Rest of trajectory - black triangles along the line
+                        if len(x_coords) > num_early:
+                            fig.add_trace(go.Scatter(
+                                x=x_coords[num_early:],
+                                y=y_coords[num_early:],
+                                mode='markers',
+                                marker=dict(
+                                    size=10,
+                                    color='black',
+                                    symbol='triangle-up',
+                                    line=dict(width=1, color='black')
+                                ),
+                                name=f"Shot {shot['shot_number']} ({traj_type})",
+                                hovertemplate=f"<b>Shot {shot['shot_number']}</b><br>" +
+                                            f"Speed: {speed_info}<br>" +
+                                            f"Type: {traj_type}<br>" +
+                                            f"Release: Board {release_board}<br>" +
+                                            f"Impact: Board {impact_board}" +
+                                            hook_point_info + "<br>" +
+                                            f"Date: {shot['session_date']}<extra></extra>"
+                            ))
+
+                        # Highlight first tracked point (GREEN - release/start of tracking)
+                        fig.add_trace(go.Scatter(
+                            x=[x_coords[0]],
+                            y=[y_coords[0]],
+                            mode='markers',
+                            marker=dict(
+                                size=15,
+                                color='lime',
+                                symbol='circle',
+                                line=dict(width=3, color='darkgreen')
+                            ),
+                            showlegend=False,
+                            hovertemplate=f"<b>FIRST TRACKED POINT</b><br>" +
+                                        f"Shot {shot['shot_number']}<br>" +
+                                        f"Board: {board_positions[0]}<extra></extra>"
+                        ))
+
+                        # Highlight last tracked point (RED - end of tracking)
+                        fig.add_trace(go.Scatter(
+                            x=[x_coords[-1]],
+                            y=[y_coords[-1]],
+                            mode='markers',
+                            marker=dict(
+                                size=15,
+                                color='red',
+                                symbol='circle',
+                                line=dict(width=3, color='darkred')
+                            ),
+                            showlegend=False,
+                            hovertemplate=f"<b>LAST TRACKED POINT</b><br>" +
+                                        f"Shot {shot['shot_number']}<br>" +
+                                        f"Board: {board_positions[-1]}<extra></extra>"
+                        ))
 
             except Exception as e:
                 # Skip shots with invalid trajectory data
                 continue
 
-    # Update layout with board numbers
+    # Update layout with board numbers (reversed: 1 on right, 39 on left)
     fig.update_layout(
         title="Bowling Shot Trajectories Overlay",
         xaxis=dict(
@@ -250,7 +409,7 @@ def create_trajectory_overlay(shots_df):
             range=[0, lane_width_px],
             tickmode='array',
             tickvals=[i * board_width_px for i in [1, 5, 10, 15, 20, 25, 30, 35, 39]],
-            ticktext=['1', '5', '10', '15', '20', '25', '30', '35', '39'],
+            ticktext=['39', '35', '30', '25', '20', '15', '10', '5', '1'],
             showgrid=True,
             gridcolor='lightgray',
             side='bottom'
@@ -259,13 +418,14 @@ def create_trajectory_overlay(shots_df):
             title="Distance from Foul Line (feet)",
             range=[0, lane_length_px],
             tickmode='array',
-            tickvals=[10, 20*SCALE, 40*SCALE, lane_length_px],
-            ticktext=['0', '20', '40', '60'],
+            tickvals=[10, 10 + (15 * SCALE), 10 + (30 * SCALE), 10 + (45 * SCALE), lane_length_px - 10],
+            ticktext=['0 (Foul)', '15 (Arrows)', '30', '45', '60 (Pins)'],
             showgrid=True,
             gridcolor='lightgray'
         ),
         plot_bgcolor='white',
-        height=800,
+        height=900,  # Taller to accommodate realistic lane proportions
+        width=550,   # Keep width reasonable for display
         showlegend=True,
         legend=dict(
             orientation="v",
